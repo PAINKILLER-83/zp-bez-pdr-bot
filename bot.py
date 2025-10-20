@@ -5,15 +5,16 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, ContextTypes, filters
 )
+from telegram.helpers import escape_markdown
 
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # "-100..." або None
-TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))  # скільки перших постів модеруємо
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))
 
-# ========= КАТЕГОРІЇ / ПДР =========
+# ========= КАТЕГОРІЇ =========
 CATEGORIES = [
     "🚗 Перестроювання без покажчика повороту",
     "↔️ Перестроювання без надання переваги",
@@ -82,7 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await update.message.reply_text(
         "👋 Привіт! Оберіть дію нижче.\n"
-        "— «📤 Новий репорт» → надішліть фото/відео порушення, потім оберіть категорію.\n"
+        "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
         "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал).",
         reply_markup=kb
     )
@@ -90,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("📸 Надішліть фото або відео порушення. Після цього оберіть категорію.")
+    await q.edit_message_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -127,11 +128,10 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         row = await cur.fetchone()
         if not row:
-            await q.edit_message_text("⚠️ Немає медіа для категоризації. Спробуйте знову.")
+            await q.edit_message_text("⚠️ Немає медіа для категоризації. Спробуйте ще раз.")
             return
         rec_id, caption, file_id, mtype = row
         await db.execute("UPDATE inbox SET category=? WHERE id=?", (category, rec_id))
-
         cur2 = await db.execute("SELECT trust FROM users WHERE user_id=?", (uid,))
         u = await cur2.fetchone()
         trust = u[0] if u else 0
@@ -146,7 +146,6 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{caption or ''}"
     )
 
-    # Якщо ввімкнена модерація і є ADMIN_CHAT_ID — йде на погодження
     if TRUST_QUOTA > 0 and ADMIN_CHAT_ID and trust < TRUST_QUOTA:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Опублікувати", callback_data=f"mod|ok|{rec_id}"),
@@ -163,7 +162,6 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🔎 Репорт надіслано на модерацію. Дякуємо!")
         return
 
-    # Інакше — одразу публікуємо
     await publish_to_channel(context, mtype, file_id, base_text)
     await q.edit_message_text("✅ Опубліковано в канал. Дякуємо!")
 
@@ -181,7 +179,6 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Запис не знайдено.")
             return
         uid, caption, file_id, mtype, category = row
-
         cur2 = await db.execute("SELECT trust FROM users WHERE user_id=?", (uid,))
         trust = (await cur2.fetchone() or (0,))[0]
 
@@ -213,19 +210,24 @@ async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TY
     text = (update.message.text or "").strip()
     if ADMIN_CHAT_ID:
         try:
+            safe_text = escape_markdown(text, version=2)
+            safe_name = escape_markdown(update.effective_user.username or 'без_ніка', version=2)
+            msg = (
+                f"📨 *Нове звернення до адміністратора*\n"
+                f"Від: @{safe_name} (id {update.effective_user.id})\n\n"
+                f"{safe_text}"
+            )
             await context.bot.send_message(
                 chat_id=int(ADMIN_CHAT_ID),
-                text=("📨 *Нове звернення до адміністратора*\n"
-                      f"Від: @{update.effective_user.username or 'без_ніка'} (id {update.effective_user.id})\n\n"
-                      f"{text}"),
-                parse_mode="Markdown"
+                text=msg,
+                parse_mode="MarkdownV2"
             )
         except Exception as e:
             print("ADMIN DM ERROR:", e)
     await update.message.reply_text("✅ Повідомлення надіслано адміністратору. Дякуємо!")
     return ConversationHandler.END
 
-# ===== Службові команди =====
+# ===== Допоміжні команди =====
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
 
@@ -236,14 +238,12 @@ tg_app.add_handler(CallbackQueryHandler(start_new_report, pattern=r"^newreport$"
 tg_app.add_handler(CallbackQueryHandler(handle_category, pattern=r"^cat\|"))
 tg_app.add_handler(CallbackQueryHandler(mod_action, pattern=r"^mod\|"))
 
-# Admin message dialog
 tg_app.add_handler(ConversationHandler(
     entry_points=[CallbackQueryHandler(ask_admin_msg, pattern=r"^adminmsg$")],
     states={ADMIN_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_msg_text)]},
     fallbacks=[]
 ))
 
-# media intake
 tg_app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
 
 # ========= FASTAPI LIFECYCLE =========
