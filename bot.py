@@ -101,3 +101,10 @@ async def telegram_webhook(secret: str, request: Request):
     update = Update.de_json(data, tg_app.bot)
     await tg_app.process_update(update)
     return {"ok": True}
+
+from telegram.ext import CommandHandler
+
+async def chatid(update, context):
+    await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
+
+tg_app.add_handler(CommandHandler("chatid", chatid))
