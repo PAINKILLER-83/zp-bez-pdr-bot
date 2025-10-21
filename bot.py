@@ -14,14 +14,15 @@ ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))
 
 # ========= КАТЕГОРІЇ =========
-CATEGORIES = [
-    "🚗 Перестроювання без покажчика повороту",
-    "↔️ Перестроювання без надання переваги",
-    "⛳ Перехрестя: перехід у іншу смугу",
-    "🅿️ Неправильне паркування (тротуар/зебра)",
-    "⛔ Рух по зустрічній",
-    "❗ Інше"
-]
+# Короткі коди -> довгі назви (щоб callback_data <= 64 байт)
+CATEGORY_MAP = {
+    "c1": "🚗 Перестроювання без покажчика повороту",
+    "c2": "↔️ Перестроювання без надання переваги",
+    "c3": "⛳ Перехрестя: перехід у іншу смугу",
+    "c4": "🅿️ Неправильне паркування (тротуар/зебра)",
+    "c5": "⛔ Рух по зустрічній",
+    "c6": "❗ Інше",
+}
 PDR_MAP = {
     "🚗 Перестроювання без покажчика повороту": "ПДР: п.9.2, п.9.4",
     "↔️ Перестроювання без надання переваги": "ПДР: п.10.3",
@@ -57,15 +58,21 @@ async def init_db():
 
 # ========= HELPERS =========
 def category_keyboard():
-    rows = [[InlineKeyboardButton(c, callback_data=f"cat|{c}")] for c in CATEGORIES]
+    # показуємо повну назву, але в callback кладемо короткий код
+    rows = [
+        [InlineKeyboardButton(name, callback_data=f"cat|{code}")]
+        for code, name in CATEGORY_MAP.items()
+    ]
     return InlineKeyboardMarkup(rows)
 
 async def ensure_user(uid: int):
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
         if not await cur.fetchone():
-            await db.execute("INSERT INTO users(user_id, trust, last_reset, hourly_count) VALUES(?,?,?,?)",
-                             (uid, 0, int(time.time()), 0))
+            await db.execute(
+                "INSERT INTO users(user_id, trust, last_reset, hourly_count) VALUES(?,?,?,?)",
+                (uid, 0, int(time.time()), 0)
+            )
             await db.commit()
 
 async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, file_id: str, text: str):
@@ -116,9 +123,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    _, category = q.data.split("|", 1)
+    _, code = q.data.split("|", 1)
     uid = q.from_user.id
     uname = q.from_user.username or "без_ніка"
+
+    category = CATEGORY_MAP.get(code)
+    if not category:
+        await q.edit_message_text("⚠️ Невідома категорія.")
+        return
 
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute(
@@ -145,19 +157,21 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{caption or ''}"
     )
 
+    # Модерація перших N постів (якщо ввімкнено і є адмін-група)
     if TRUST_QUOTA > 0 and ADMIN_CHAT_ID and trust < TRUST_QUOTA:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Опублікувати", callback_data=f"mod|ok|{rec_id}"),
             InlineKeyboardButton("❌ Відхилити", callback_data=f"mod|no|{rec_id}")
         ]])
-        caption = "📝 На модерацію\n" + base_text
+        adm_caption = "📝 На модерацію\n" + base_text
         if mtype == "photo":
-            await context.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=caption, reply_markup=kb)
+            await context.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=adm_caption, reply_markup=kb)
         else:
-            await context.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=caption, reply_markup=kb)
+            await context.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=adm_caption, reply_markup=kb)
         await q.edit_message_text("🔎 Репорт надіслано на модерацію. Дякуємо!")
         return
 
+    # Інакше — одразу публікуємо
     await publish_to_channel(context, mtype, file_id, base_text)
     await q.edit_message_text("✅ Опубліковано в канал. Дякуємо!")
 
@@ -168,8 +182,10 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rec_id = int(rec_id)
 
     async with aiosqlite.connect("bot.db") as db:
-        cur = await db.execute("SELECT user_id, caption, media_file_id, media_type, category FROM inbox WHERE id=?",
-                               (rec_id,))
+        cur = await db.execute(
+            "SELECT user_id, caption, media_file_id, media_type, category FROM inbox WHERE id=?",
+            (rec_id,)
+        )
         row = await cur.fetchone()
         if not row:
             await q.edit_message_text("Запис не знайдено.")
