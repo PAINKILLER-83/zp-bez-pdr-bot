@@ -478,9 +478,15 @@ async def on_startup():
     await init_db()
     await tg_app.initialize()
     await tg_app.start()
+    # якщо у тебе є keep-alive задача — лиши/додай тут її старт:
+    # app.state.keepalive = asyncio.create_task(keep_alive_task())
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    # якщо є keep-alive — коректно зупини:
+    # task = getattr(app.state, "keepalive", None)
+    # if task:
+    #     task.cancel()
     await tg_app.stop()
     await tg_app.shutdown()
 
@@ -488,7 +494,8 @@ async def on_shutdown():
 async def root():
     return {"ok": True}
 
-@app.post(f"/webhook/{secret}")
+# ========= WEBHOOK =========
+@app.post("/webhook/{secret}")
 async def telegram_webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403)
