@@ -462,7 +462,7 @@ async def on_shutdown():
 async def root():
     return {"ok": True}
 
-@app.post(f"/webhook/{{secret}}")
+@app.post("/webhook/{secret}")
 async def telegram_webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403)
