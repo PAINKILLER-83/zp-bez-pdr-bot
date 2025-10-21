@@ -5,7 +5,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, ContextTypes, filters
 )
-from telegram.helpers import escape_markdown
 
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -151,14 +150,11 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✅ Опублікувати", callback_data=f"mod|ok|{rec_id}"),
             InlineKeyboardButton("❌ Відхилити", callback_data=f"mod|no|{rec_id}")
         ]])
+        caption = "📝 На модерацію\n" + base_text
         if mtype == "photo":
-            await context.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id,
-                                         caption="📝 *На модерацію*\n" + base_text, parse_mode="Markdown",
-                                         reply_markup=kb)
+            await context.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=caption, reply_markup=kb)
         else:
-            await context.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id,
-                                         caption="📝 *На модерацію*\n" + base_text, parse_mode="Markdown",
-                                         reply_markup=kb)
+            await context.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=caption, reply_markup=kb)
         await q.edit_message_text("🔎 Репорт надіслано на модерацію. Дякуємо!")
         return
 
@@ -210,20 +206,16 @@ async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TY
     text = (update.message.text or "").strip()
     if ADMIN_CHAT_ID:
         try:
-            safe_text = escape_markdown(text, version=2)
-            safe_name = escape_markdown(update.effective_user.username or 'без_ніка', version=2)
+            uname = update.effective_user.username or 'без_ніка'
             msg = (
-                f"📨 *Нове звернення до адміністратора*\n"
-                f"Від: @{safe_name} (id {update.effective_user.id})\n\n"
-                f"{safe_text}"
+                "📨 Нове звернення до адміністратора\n"
+                f"Від: @{uname} (id {update.effective_user.id})\n\n"
+                f"{text}"
             )
-            await context.bot.send_message(
-                chat_id=int(ADMIN_CHAT_ID),
-                text=msg,
-                parse_mode="MarkdownV2"
-            )
+            await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=msg)
         except Exception as e:
             print("ADMIN DM ERROR:", e)
+
     await update.message.reply_text("✅ Повідомлення надіслано адміністратору. Дякуємо!")
     return ConversationHandler.END
 
