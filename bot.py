@@ -1,4 +1,4 @@
-import os, time, asyncio, aiosqlite
+import os, time, aiosqlite
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,14 +8,12 @@ from telegram.ext import (
 
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")  # @public або -100... для приватного
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
-TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))
-HOST_URL = os.environ.get("HOST_URL", "https://zp-bez-pdr-bot.onrender.com")
-PING_INTERVAL_SEC = int(os.environ.get("PING_INTERVAL_SEC", "420"))
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")           # -100... або id групи з модераторами
+TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))     # скільки перших постів модеруємо
 
-# ========= КАТЕГОРІЇ =========
+# ========= КАТЕГОРІЇ (короткий код -> довга назва) =========
 CATEGORY_MAP = {
     "c1": "🚗 Перестроювання без покажчика повороту",
     "c2": "↔️ Перестроювання без надання переваги",
@@ -40,6 +38,7 @@ tg_app: Application = Application.builder().token(BOT_TOKEN).build()
 # ========= DB =========
 async def init_db():
     async with aiosqlite.connect("bot.db") as db:
+        # користувачі
         await db.execute("""CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             trust INT DEFAULT 0,
@@ -47,6 +46,7 @@ async def init_db():
             hourly_count INT DEFAULT 0,
             seen_menu INT DEFAULT 0
         )""")
+        # вхідні репорти
         await db.execute("""CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -60,6 +60,17 @@ async def init_db():
             location_text TEXT,
             user_note TEXT
         )""")
+        # міграції на випадок старих таблиць
+        try: await db.execute("ALTER TABLE users ADD COLUMN seen_menu INT DEFAULT 0")
+        except: pass
+        for col, sqltype in [
+            ("location_lat", "REAL"),
+            ("location_lon", "REAL"),
+            ("location_text", "TEXT"),
+            ("user_note", "TEXT"),
+        ]:
+            try: await db.execute(f"ALTER TABLE inbox ADD COLUMN {col} {sqltype}")
+            except: pass
         await db.commit()
 
 # ========= HELPERS =========
@@ -82,8 +93,10 @@ async def ensure_user(uid: int):
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
         if not await cur.fetchone():
-            await db.execute("INSERT INTO users(user_id, trust, last_reset, hourly_count, seen_menu) VALUES(?,?,?,?,?)",
-                             (uid, 0, int(time.time()), 0, 0))
+            await db.execute(
+                "INSERT INTO users(user_id, trust, last_reset, hourly_count, seen_menu) VALUES(?,?,?,?,?)",
+                (uid, 0, int(time.time()), 0, 0)
+            )
             await db.commit()
 
 def resolve_chat_id(val: str):
@@ -91,48 +104,57 @@ def resolve_chat_id(val: str):
     if v.startswith("-100"):
         try: return int(v)
         except: pass
-    return v
+    return v  # @username
 
-async def publish_to_channel(context, mtype, file_id, text):
+async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, file_id: str, text: str):
     chat = resolve_chat_id(CHANNEL_ID)
     if mtype == "photo":
         await context.bot.send_photo(chat_id=chat, photo=file_id, caption=text)
     else:
         await context.bot.send_video(chat_id=chat, video=file_id, caption=text)
 
-async def edit_q_message(q, text, kb=None):
+async def edit_q_message(q: "telegram.CallbackQuery", text: str, kb=None):
     try:
-        if q.message.photo or q.message.video:
+        if q.message and (q.message.photo or q.message.video):
             await q.edit_message_caption(caption=text, reply_markup=kb)
         else:
             await q.edit_message_text(text=text, reply_markup=kb)
-    except: pass
+    except Exception:
+        pass
 
 async def get_inbox_rec(rec_id: int):
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute(
             "SELECT user_id, caption, media_file_id, media_type, category,"
-            " location_lat, location_lon, location_text, user_note FROM inbox WHERE id=?",
-            (rec_id,)
+            " location_lat, location_lon, location_text, user_note "
+            "FROM inbox WHERE id=?", (rec_id,)
         )
         return await cur.fetchone()
 
-async def send_main_menu(chat_id, context):
+async def send_main_menu(chat_id, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Новий репорт", callback_data="newreport")],
         [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")]
     ])
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=("👋 Привіт! Оберіть дію нижче.\n"
-              "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
-              "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал)."),
-        reply_markup=kb
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=("👋 Привіт! Оберіть дію нижче.\n"
+                  "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
+                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал)."),
+            reply_markup=kb
+        )
+    except Exception:
+        pass
 
 # ========= HANDLERS =========
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update.effective_chat.id, context)
+
+# /report — швидкий старт репорту (опціонально)
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
 
 async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -142,6 +164,7 @@ async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await ensure_user(user.id)
+
     async with aiosqlite.connect("bot.db") as db:
         caption = (update.message.caption or "").strip()
         if update.message.photo:
@@ -151,9 +174,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("📎 Надішліть фото або відео, не документ.")
             return
-        await db.execute("INSERT INTO inbox(user_id,caption,media_file_id,media_type,category,ts) VALUES(?,?,?,?,?,?)",
-                         (user.id, caption, file_id, mtype, "", int(time.time())))
+        await db.execute(
+            "INSERT INTO inbox(user_id,caption,media_file_id,media_type,category,ts) VALUES(?,?,?,?,?,?)",
+            (user.id, caption, file_id, mtype, "", int(time.time()))
+        )
         await db.commit()
+
     await update.message.reply_text("🚦 Оберіть категорію:", reply_markup=category_keyboard())
 
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,46 +187,271 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     _, code = q.data.split("|", 1)
     uid = q.from_user.id
+
     category = CATEGORY_MAP.get(code)
     if not category:
         await edit_q_message(q, "⚠️ Невідома категорія.")
         return
+
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute(
             "SELECT id,caption,media_file_id,media_type,location_lat,location_lon,location_text,user_note "
-            "FROM inbox WHERE user_id=? AND category='' ORDER BY id DESC LIMIT 1", (uid,))
+            "FROM inbox WHERE user_id=? AND category='' ORDER BY id DESC LIMIT 1",
+            (uid,)
+        )
         row = await cur.fetchone()
         if not row:
-            await edit_q_message(q, "⚠️ Немає медіа для категоризації.")
+            await edit_q_message(q, "⚠️ Немає медіа для категоризації. Спробуйте ще раз.")
             return
         rec_id = row[0]
         await db.execute("UPDATE inbox SET category=? WHERE id=?", (category, rec_id))
         await db.commit()
+
     has_loc = bool(row[4] and row[5]) or bool(row[6])
     has_note = bool(row[7])
-    await edit_q_message(q, "ℹ️ За бажанням додайте локацію чи коментар і натисніть «➡️ Далі».",
-                         kb=detail_menu_kb(has_loc, has_note, rec_id))
+    await edit_q_message(
+        q,
+        "ℹ️ За бажанням додайте локацію та/або коментар. Потім натисніть «➡️ Далі».",
+        kb=detail_menu_kb(has_loc, has_note, rec_id)
+    )
 
-# (усі решта хендлери — ті ж самі, як у твоїй останній версії, включно з mod_action, handle_location, handle_text_while_waiting тощо)
+# ===== Деталі репорту (локація/нотатка/фініш) =====
+async def det_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, action, rec_s = q.data.split("|", 2)
+    rec_id = int(rec_s)
 
-# ========= АНТИ-СОН (PING LOOP) =========
-async def ping_self():
-    while True:
+    if action == "loc":
+        context.user_data["await_loc_rec"] = rec_id
+        await q.message.reply_text(
+            "📍 Надішліть геолокацію (Скріпка → Локація) АБО напишіть текст-адресу.\n"
+            "Коли закінчите, знову натисніть «➡️ Далі»."
+        )
+        row = await get_inbox_rec(rec_id)
+        has_loc = bool(row[5] and row[6]) or bool(row[7])
+        has_note = bool(row[8])
+        await edit_q_message(q, "ℹ️ Додайте деталі або тисніть «➡️ Далі».",
+                             kb=detail_menu_kb(has_loc, has_note, rec_id))
+        return
+
+    if action == "note":
+        context.user_data["await_note_rec"] = rec_id
+        await q.message.reply_text("📝 Надішліть текстовий коментар (номер авто, час, смуги тощо).")
+        row = await get_inbox_rec(rec_id)
+        has_loc = bool(row[5] and row[6]) or bool(row[7])
+        has_note = bool(row[8])
+        await edit_q_message(q, "ℹ️ Додайте деталі або тисніть «➡️ Далі».",
+                             kb=detail_menu_kb(has_loc, has_note, rec_id))
+        return
+
+    if action == "done":
+        row = await get_inbox_rec(rec_id)
+        if not row:
+            await edit_q_message(q, "❗ Запис не знайдено.")
+            return
+        uid, caption, file_id, mtype, category, lat, lon, loc_text, user_note = row
+        uname = update.effective_user.username or "без_ніка"
+
+        parts = [
+            "🚗 Порушення ПДР | Запоріжжя",
+            f"🗂 Категорія: {category}",
+            f"🧾 {PDR_MAP.get(category,'ПДР: (уточнити)')}",
+            f"👤 Від: @{uname} (id {uid})",
+        ]
+        if (lat is not None and lon is not None):
+            parts.append(f"📍 Локація: https://maps.google.com/?q={lat:.6f},{lon:.6f}")
+        elif loc_text:
+            parts.append(f"📍 Локація: {loc_text}")
+        if user_note:
+            parts.append(f"📝 Примітка: {user_note}")
+        if caption:
+            parts.append("")
+            parts.append(caption)
+        base_text = "\n".join(parts)
+
+        async with aiosqlite.connect("bot.db") as db:
+            cur = await db.execute("SELECT trust FROM users WHERE user_id=?", (uid,))
+            trust = (await cur.fetchone() or (0,))[0]
+
+        if TRUST_QUOTA > 0 and ADMIN_CHAT_ID and trust < TRUST_QUOTA:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Опублікувати", callback_data=f"mod|ok|{rec_id}"),
+                InlineKeyboardButton("❌ Відхилити",   callback_data=f"mod|no|{rec_id}")
+            ]])
+            adm_caption = "📝 На модерацію\n" + base_text
+            try:
+                await tg_app.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id,
+                                            caption=adm_caption, reply_markup=kb) if mtype == "photo" \
+                else await tg_app.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id,
+                                                 caption=adm_caption, reply_markup=kb)
+            except Exception as e:
+                await edit_q_message(q, f"❗ Не вдалося надіслати на модерацію: {e}")
+                return
+            await edit_q_message(q, "🔎 Репорт надіслано на модерацію. Дякуємо!")
+            return
+
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as s:
-                async with s.get(HOST_URL) as r:
-                    print(f"Ping: {r.status}")
+            await publish_to_channel(context, mtype, file_id, base_text)
+            await edit_q_message(q, "✅ Опубліковано в канал. Дякуємо!")
         except Exception as e:
-            print(f"Ping error: {e}")
-        await asyncio.sleep(PING_INTERVAL_SEC)
+            await edit_q_message(q, f"❗ Не вдалося опублікувати: {e}")
 
+# ===== Прийом геолокації / адреси / нотатки =====
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "await_loc_rec" not in context.user_data:
+        return
+    rec_id = context.user_data.pop("await_loc_rec")
+    loc = update.message.location
+    if not loc:
+        return
+    async with aiosqlite.connect("bot.db") as db:
+        await db.execute("UPDATE inbox SET location_lat=?, location_lon=?, location_text=NULL WHERE id=?",
+                         (loc.latitude, loc.longitude, rec_id))
+        await db.commit()
+    await update.message.reply_text("✅ Локацію збережено.")
+
+async def handle_text_while_waiting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    if "await_loc_rec" in context.user_data:
+        rec_id = context.user_data.pop("await_loc_rec")
+        async with aiosqlite.connect("bot.db") as db:
+            await db.execute("UPDATE inbox SET location_text=?, location_lat=NULL, location_lon=NULL WHERE id=?",
+                             (text, rec_id))
+            await db.commit()
+        await update.message.reply_text("✅ Адресу збережено.")
+        return
+    if "await_note_rec" in context.user_data:
+        rec_id = context.user_data.pop("await_note_rec")
+        async with aiosqlite.connect("bot.db") as db:
+            await db.execute("UPDATE inbox SET user_note=? WHERE id=?", (text, rec_id))
+            await db.commit()
+        await update.message.reply_text("✅ Коментар збережено.")
+        return
+
+# ===== Авто-меню для новачків (без /start) =====
+async def auto_menu_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "await_loc_rec" in context.user_data or "await_note_rec" in context.user_data:
+        return
+    uid = update.effective_user.id
+    await ensure_user(uid)
+    async with aiosqlite.connect("bot.db") as db:
+        cur = await db.execute("SELECT seen_menu FROM users WHERE user_id=?", (uid,))
+        row = await cur.fetchone()
+        seen = (row[0] if row else 0)
+        if not seen:
+            await db.execute("UPDATE users SET seen_menu=1 WHERE user_id=?", (uid,))
+            await db.commit()
+            await send_main_menu(update.effective_chat.id, context)
+
+# ===== Модерація =====
+async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, decision, rec_s = q.data.split("|", 2)
+    rec_id = int(rec_s)
+
+    row = await get_inbox_rec(rec_id)
+    if not row:
+        await edit_q_message(q, "Запис не знайдено.")
+        return
+    uid, caption, file_id, mtype, category, lat, lon, loc_text, user_note = row
+
+    async with aiosqlite.connect("bot.db") as db:
+        cur = await db.execute("SELECT trust FROM users WHERE user_id=?", (uid,))
+        trust = (await cur.fetchone() or (0,))[0]
+
+    if decision == "ok":
+        parts = [
+            "🚗 Порушення ПДР | Запоріжжя",
+            f"🗂 Категорія: {category}",
+            f"🧾 {PDR_MAP.get(category,'ПДР: (уточнити)')}",
+        ]
+        if (lat is not None and lon is not None):
+            parts.append(f"📍 Локація: https://maps.google.com/?q={lat:.6f},{lon:.6f}")
+        elif loc_text:
+            parts.append(f"📍 Локація: {loc_text}")
+        if user_note:
+            parts.append(f"📝 Примітка: {user_note}")
+        if caption:
+            parts.append("")
+            parts.append(caption)
+        text = "\n".join(parts)
+
+        try:
+            await publish_to_channel(context, mtype, file_id, text)
+            new_trust = min(trust + 1, TRUST_QUOTA)
+            async with aiosqlite.connect("bot.db") as db:
+                await db.execute("UPDATE users SET trust=? WHERE user_id=?", (new_trust, uid))
+                await db.commit()
+            await edit_q_message(q, f"✅ Опубліковано. Довіра користувача: {new_trust}/{TRUST_QUOTA}")
+        except Exception as e:
+            await edit_q_message(q, f"❗ Не вдалося опублікувати: {e}\nПеревірте CHANNEL_ID та права бота.")
+    else:
+        await edit_q_message(q, "❌ Відхилено.")
+
+# ===== Звернення до адміністратора =====
+ADMIN_MSG = 1001
+
+async def ask_admin_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("✍️ Напишіть текст повідомлення адміністратору. Воно **не публікується** в каналі.")
+    return ADMIN_MSG
+
+async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if ADMIN_CHAT_ID:
+        try:
+            uname = update.effective_user.username or 'без_ніка'
+            msg = (
+                "📨 Нове звернення до адміністратора\n"
+                f"Від: @{uname} (id {update.effective_user.id})\n\n"
+                f"{text}"
+            )
+            await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=msg)
+        except Exception as e:
+            print("ADMIN DM ERROR:", e)
+
+    await update.message.reply_text("✅ Повідомлення надіслано адміністратору. Дякуємо!")
+    return ConversationHandler.END
+
+# ===== Допоміжні команди =====
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
+
+# ========= ROUTING =========
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CommandHandler("report", report_cmd))
+tg_app.add_handler(CommandHandler("chatid", chatid))
+
+tg_app.add_handler(CallbackQueryHandler(start_new_report, pattern=r"^newreport$"))
+tg_app.add_handler(CallbackQueryHandler(handle_category,   pattern=r"^cat\|"))
+tg_app.add_handler(CallbackQueryHandler(det_action,        pattern=r"^det\|"))
+tg_app.add_handler(CallbackQueryHandler(mod_action,        pattern=r"^mod\|"))
+
+tg_app.add_handler(ConversationHandler(
+    entry_points=[CallbackQueryHandler(ask_admin_msg, pattern=r"^adminmsg$")],
+    states={ADMIN_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_msg_text)]},
+    fallbacks=[]
+))
+
+# прийом медіа
+tg_app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
+# прийом геолокації/тексту під час очікування
+tg_app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_while_waiting))
+# авто-меню як останній текстовий хендлер
+tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_menu_fallback))
+
+# ========= FASTAPI LIFECYCLE =========
 @app.on_event("startup")
 async def on_startup():
     await init_db()
     await tg_app.initialize()
     await tg_app.start()
-    asyncio.create_task(ping_self())
 
 @app.on_event("shutdown")
 async def on_shutdown():
