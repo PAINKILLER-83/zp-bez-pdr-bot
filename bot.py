@@ -31,6 +31,16 @@ PDR_MAP = {
     "❗ Інше": "ПДР: (уточнити)",
 }
 
+# ========= RULES =========
+RULES_TEXT = (
+    "📜 Правила публікацій:\n"
+    "1) Публікуємо факти: фото/відео + короткий опис. Без образ та оцінок.\n"
+    "2) Не публікуємо зайві персональні дані, що не потрібні для фіксації порушення.\n"
+    "3) Якщо в кадрі чітко видно обличчя сторонніх людей/дітей — по можливості не знімайте крупним планом.\n"
+    "4) Пости — це повідомлення про можливе порушення. Остаточне рішення — за поліцією.\n\n"
+    "Звʼязок із адміністратором — через кнопку «Звернутись до адміністратора» в боті."
+)
+
 # ========= FASTAPI + PTB =========
 app = FastAPI()
 tg_app: Application = Application.builder().token(BOT_TOKEN).build()
@@ -60,7 +70,7 @@ async def init_db():
             location_text TEXT,
             user_note TEXT
         )""")
-        # сумісність зі старою схемою
+        # сумісність зі старою схемою (idempotent)
         try: await db.execute("ALTER TABLE users ADD COLUMN seen_menu INT DEFAULT 0")
         except: pass
         try: await db.execute("ALTER TABLE inbox ADD COLUMN location_lat REAL")
@@ -134,14 +144,16 @@ async def get_inbox_rec(rec_id: int):
 async def send_main_menu(chat_id, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Новий репорт", callback_data="newreport")],
-        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")]
+        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")],
+        [InlineKeyboardButton("📜 Правила / Дисклеймер", callback_data="showrules")]
     ])
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=("👋 Привіт! Оберіть дію нижче.\n"
                   "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
-                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал)."),
+                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал).\n"
+                  "— «📜 Правила / Дисклеймер» — ознайомитись з правилами публікацій."),
             reply_markup=kb
         )
     except Exception:
@@ -161,6 +173,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /report — швидкий старт репорту
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
+
+# /rules — показати правила
+async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(RULES_TEXT, disable_web_page_preview=True)
+
+# Кнопка “📜 Правила / Дисклеймер”
+async def show_rules_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await edit_q_message(q, RULES_TEXT)
 
 async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -427,12 +449,14 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= ROUTING =========
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CommandHandler("report", report_cmd))
+tg_app.add_handler(CommandHandler("rules", rules_cmd))        # ← додано
 tg_app.add_handler(CommandHandler("chatid", chatid))
 
 tg_app.add_handler(CallbackQueryHandler(start_new_report, pattern=r"^newreport$"))
 tg_app.add_handler(CallbackQueryHandler(handle_category,   pattern=r"^cat\|"))
 tg_app.add_handler(CallbackQueryHandler(det_action,        pattern=r"^det\|"))
 tg_app.add_handler(CallbackQueryHandler(mod_action,        pattern=r"^mod\|"))
+tg_app.add_handler(CallbackQueryHandler(show_rules_btn,    pattern=r"^showrules$"))  # ← додано
 
 tg_app.add_handler(ConversationHandler(
     entry_points=[CallbackQueryHandler(ask_admin_msg, pattern=r"^adminmsg$")],
@@ -464,7 +488,7 @@ async def on_shutdown():
 async def root():
     return {"ok": True}
 
-@app.post(f"/webhook/{{secret}}")
+@app.post(f"/webhook/{secret}")
 async def telegram_webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403)
