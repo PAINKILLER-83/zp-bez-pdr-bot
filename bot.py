@@ -10,11 +10,10 @@ from telegram.ext import (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
-TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")         # -100...
+TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))   # скільки перших постів модеруємо
 
-# ========= КАТЕГОРІЇ =========
-# Короткі коди -> довгі назви (щоб callback_data <= 64 байт)
+# ========= КАТЕГОРІЇ (короткий код -> довга назва) =========
 CATEGORY_MAP = {
     "c1": "🚗 Перестроювання без покажчика повороту",
     "c2": "↔️ Перестроювання без надання переваги",
@@ -58,12 +57,10 @@ async def init_db():
 
 # ========= HELPERS =========
 def category_keyboard():
-    # показуємо повну назву, але в callback кладемо короткий код
-    rows = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(name, callback_data=f"cat|{code}")]
         for code, name in CATEGORY_MAP.items()
-    ]
-    return InlineKeyboardMarkup(rows)
+    ])
 
 async def ensure_user(uid: int):
     async with aiosqlite.connect("bot.db") as db:
@@ -80,6 +77,21 @@ async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, fil
         await context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=text)
     else:
         await context.bot.send_video(chat_id=CHANNEL_ID, video=file_id, caption=text)
+
+async def edit_q_message(q: "telegram.CallbackQuery", text: str):
+    """
+    Акуратно редагує повідомлення з кнопками:
+      - якщо це медіа (photo/video) → міняємо caption
+      - якщо звичайний текст → міняємо текст
+    """
+    try:
+        if q.message.photo or q.message.video:
+            await q.edit_message_caption(caption=text, reply_markup=None)
+        else:
+            await q.edit_message_text(text=text, reply_markup=None)
+    except Exception:
+        # на випадок, якщо Telegram каже "message is not modified" — ігноруємо
+        pass
 
 # ========= HANDLERS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,7 +141,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     category = CATEGORY_MAP.get(code)
     if not category:
-        await q.edit_message_text("⚠️ Невідома категорія.")
+        await edit_q_message(q, "⚠️ Невідома категорія.")
         return
 
     async with aiosqlite.connect("bot.db") as db:
@@ -139,7 +151,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         row = await cur.fetchone()
         if not row:
-            await q.edit_message_text("⚠️ Немає медіа для категоризації. Спробуйте ще раз.")
+            await edit_q_message(q, "⚠️ Немає медіа для категоризації. Спробуйте ще раз.")
             return
         rec_id, caption, file_id, mtype = row
         await db.execute("UPDATE inbox SET category=? WHERE id=?", (category, rec_id))
@@ -168,12 +180,12 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=adm_caption, reply_markup=kb)
         else:
             await context.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=adm_caption, reply_markup=kb)
-        await q.edit_message_text("🔎 Репорт надіслано на модерацію. Дякуємо!")
+        await edit_q_message(q, "🔎 Репорт надіслано на модерацію. Дякуємо!")
         return
 
     # Інакше — одразу публікуємо
     await publish_to_channel(context, mtype, file_id, base_text)
-    await q.edit_message_text("✅ Опубліковано в канал. Дякуємо!")
+    await edit_q_message(q, "✅ Опубліковано в канал. Дякуємо!")
 
 async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -188,7 +200,7 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         row = await cur.fetchone()
         if not row:
-            await q.edit_message_text("Запис не знайдено.")
+            await edit_q_message(q, "Запис не знайдено.")
             return
         uid, caption, file_id, mtype, category = row
         cur2 = await db.execute("SELECT trust FROM users WHERE user_id=?", (uid,))
@@ -205,9 +217,9 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_trust = min(trust + 1, TRUST_QUOTA)
             await db.execute("UPDATE users SET trust=? WHERE user_id=?", (new_trust, uid))
             await db.commit()
-            await q.edit_message_text(f"✅ Опубліковано. Довіра користувача: {new_trust}/{TRUST_QUOTA}")
+            await edit_q_message(q, f"✅ Опубліковано. Довіра користувача: {new_trust}/{TRUST_QUOTA}")
         else:
-            await q.edit_message_text("❌ Відхилено.")
+            await edit_q_message(q, "❌ Відхилено.")
 
 # ===== Звернення до адміністратора =====
 ADMIN_MSG = 1001
