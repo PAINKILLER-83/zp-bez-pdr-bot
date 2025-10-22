@@ -479,7 +479,8 @@ async def on_shutdown():
 
 @app.get("/")
 async def root():
-    return {"ok": True}
+    print("✅ PING from CRON received — Render instance is awake.")
+    return {"ok": True, "ping": "received"}
 
 # ========= WEBHOOK =========
 @app.post("/webhook/{secret}")
