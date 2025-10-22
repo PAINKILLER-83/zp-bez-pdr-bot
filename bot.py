@@ -7,11 +7,11 @@ from telegram.ext import (
 )
 
 # ========= ENV =========
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")   # @public або -100... для приватного
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")            # -100... або id групи з модераторами
-TRUST_QUOTA   = int(os.environ.get("TRUST_QUOTA", "0"))    # скільки перших постів модеруємо
+BOT_TOKEN     = os.environ["BOT_TOKEN"]
+CHANNEL_ID    = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")   # @public або -100... для приватного
+WEBHOOK_SECRET= os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")               # -100... або id групи з модераторами
+TRUST_QUOTA   = int(os.environ.get("TRUST_QUOTA", "0"))       # скільки перших постів модеруємо
 
 # ========= КАТЕГОРІЇ =========
 CATEGORY_MAP = {
@@ -30,6 +30,16 @@ PDR_MAP = {
     "⛔ Рух по зустрічній": "ПДР: розд.11",
     "❗ Інше": "ПДР: (уточнити)",
 }
+
+# ========= ПРАВИЛА =========
+RULES_TEXT = (
+    "📜 Правила публікацій:\n"
+    "1) Публікуємо факти: фото/відео + короткий опис. Без образ та оціночних суджень.\n"
+    "2) Не публікуємо зайві персональні дані, що не потрібні для фіксації порушення.\n"
+    "3) Якщо в кадрі чітко видно обличчя сторонніх людей/дітей — по можливості не знімайте крупним планом.\n"
+    "4) Пости — це повідомлення про можливе порушення. Остаточне рішення — за поліцією.\n\n"
+    "Звʼязок із адміністратором — через кнопку «Звернутись до адміністратора» в боті."
+)
 
 # ========= FASTAPI + PTB =========
 app = FastAPI()
@@ -62,26 +72,25 @@ async def init_db():
             admin_text_override TEXT,
             admin_category_override TEXT
         )""")
-        # додаткові колонки для міграції
-        try: await db.execute("ALTER TABLE users ADD COLUMN seen_menu INT DEFAULT 0")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN location_lat REAL")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN location_lon REAL")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN location_text TEXT")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN user_note TEXT")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN admin_text_override TEXT")
-        except: pass
-        try: await db.execute("ALTER TABLE inbox ADD COLUMN admin_category_override TEXT")
-        except: pass
+        # ідемпотентні міграції
+        for ddl in [
+            "ALTER TABLE users ADD COLUMN seen_menu INT DEFAULT 0",
+            "ALTER TABLE inbox ADD COLUMN location_lat REAL",
+            "ALTER TABLE inbox ADD COLUMN location_lon REAL",
+            "ALTER TABLE inbox ADD COLUMN location_text TEXT",
+            "ALTER TABLE inbox ADD COLUMN user_note TEXT",
+            "ALTER TABLE inbox ADD COLUMN admin_text_override TEXT",
+            "ALTER TABLE inbox ADD COLUMN admin_category_override TEXT",
+        ]:
+            try:
+                await db.execute(ddl)
+            except:
+                pass
         await db.commit()
 
 # ========= HELPERS =========
 def category_keyboard(prefix="cat", for_rec_id=None):
-    # prefix: "cat" для користувача, "recatset" для адміна
+    # prefix: "cat" для користувача, "recatset" для адміна (з rec_id)
     rows = []
     for code, name in CATEGORY_MAP.items():
         data = f"{prefix}|{code}" if for_rec_id is None else f"{prefix}|{code}|{for_rec_id}"
@@ -122,7 +131,6 @@ async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, fil
         await context.bot.send_video(chat_id=chat, video=file_id, caption=text)
 
 async def edit_q_message(q: "telegram.CallbackQuery", text: str, kb=None):
-    # міняємо підпис до фото/відео або текст — що є
     try:
         if q.message.photo or q.message.video:
             await q.edit_message_caption(caption=text, reply_markup=kb)
@@ -144,14 +152,16 @@ async def get_inbox_rec(rec_id: int):
 async def send_main_menu(chat_id, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Новий репорт", callback_data="newreport")],
-        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")]
+        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")],
+        [InlineKeyboardButton("📜 Правила / Дисклеймер", callback_data="showrules")]
     ])
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=("👋 Привіт! Оберіть дію нижче.\n"
                   "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
-                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал)."),
+                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал).\n"
+                  "— «📜 Правила / Дисклеймер» — ознайомитись з правилами публікацій."),
             reply_markup=kb
         )
     except Exception:
@@ -172,11 +182,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
 
+# /rules — показати правила
+async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(RULES_TEXT, disable_web_page_preview=True)
+
+# кнопка "Правила" з меню
+async def show_rules_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await edit_q_message(q, RULES_TEXT)
+
+# кнопка "Новий репорт"
 async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     await q.edit_message_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
 
+# прийом фото/відео від користувача
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await ensure_user(user.id)
@@ -198,6 +220,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🚦 Оберіть категорію:", reply_markup=category_keyboard("cat"))
 
+# вибір категорії користувачем
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -212,8 +235,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect("bot.db") as db:
         cur = await db.execute(
             "SELECT id,caption,media_file_id,media_type,location_lat,location_lon,location_text,user_note "
-            "FROM inbox WHERE user_id=? AND category='' ORDER BY id DESC LIMIT 1",
-            (uid,)
+            "FROM inbox WHERE user_id=? AND category='' ORDER BY id DESC LIMIT 1", (uid,)
         )
         row = await cur.fetchone()
         if not row:
@@ -305,10 +327,11 @@ async def det_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             adm_caption = "📝 На модерацію\n" + base_text
             try:
-                await tg_app.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=adm_caption, reply_markup=kb) if mtype=="photo" \
-                    else await tg_app.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=adm_caption, reply_markup=kb)
+                if mtype == "photo":
+                    await tg_app.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=adm_caption, reply_markup=kb)
+                else:
+                    await tg_app.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=adm_caption, reply_markup=kb)
             except:
-                # якщо ADMIN_CHAT_ID як @username (групи так не працюють) — або помилка доступу
                 pass
             await edit_q_message(q, "🔎 Репорт надіслано на модерацію. Дякуємо!")
             return
@@ -360,7 +383,6 @@ async def handle_text_while_waiting(update: Update, context: ContextTypes.DEFAUL
 
 # ===== Авто-меню для новачків (без /start) =====
 async def auto_menu_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # не чіпаємо, якщо чекаємо локацію/нотатку
     if "await_loc_rec" in context.user_data or "await_note_rec" in context.user_data:
         return
     uid = update.effective_user.id
@@ -442,20 +464,19 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_text_override_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         return
-    # тільки якщо це адмін-чат
     if str(update.effective_chat.id) != str(int(ADMIN_CHAT_ID)):
         return
     if "admin_edit_rec" not in context.user_data:
         return
-    rec_id = context.user_data.pop("admin_edit_rec")
     new_text = (update.message.text or "").strip()
     if not new_text:
         await update.message.reply_text("Порожній текст. Спробуйте ще раз натиснувши «✏️ Редагувати текст».")
         return
+    rec_id = context.user_data.pop("admin_edit_rec")
     async with aiosqlite.connect("bot.db") as db:
         await db.execute("UPDATE inbox SET admin_text_override=? WHERE id=?", (new_text, rec_id))
         await db.commit()
-    await update.message.reply_text("✅ Текст відредаговано. Натисніть «✅ Опублікувати».")
+    await update.message.reply_text("✅ Текст відредаговано. Тисніть «✅ Опублікувати».")
 
 # приймаємо нову категорію від адміна
 async def admin_recat_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -498,7 +519,6 @@ async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=msg)
         except Exception as e:
             print("ADMIN DM ERROR:", e)
-
     await update.message.reply_text("✅ Повідомлення надіслано адміністратору. Дякуємо!")
     return ConversationHandler.END
 
@@ -509,6 +529,7 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= ROUTING =========
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CommandHandler("report", report_cmd))
+tg_app.add_handler(CommandHandler("rules", rules_cmd))
 tg_app.add_handler(CommandHandler("chatid", chatid))
 
 tg_app.add_handler(CallbackQueryHandler(start_new_report, pattern=r"^newreport$"))
@@ -516,12 +537,7 @@ tg_app.add_handler(CallbackQueryHandler(handle_category,   pattern=r"^cat\|"))
 tg_app.add_handler(CallbackQueryHandler(det_action,        pattern=r"^det\|"))
 tg_app.add_handler(CallbackQueryHandler(mod_action,        pattern=r"^mod\|"))
 tg_app.add_handler(CallbackQueryHandler(admin_recat_set,   pattern=r"^recatset\|"))
-
-tg_app.add_handler(ConversationHandler(
-    entry_points=[CallbackQueryHandler(ask_admin_msg, pattern=r"^adminmsg$")],
-    states={ADMIN_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_msg_text)]},
-    fallbacks=[]
-))
+tg_app.add_handler(CallbackQueryHandler(show_rules_btn,    pattern=r"^showrules$"))
 
 # прийом медіа
 tg_app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
