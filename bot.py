@@ -1,4 +1,7 @@
-import os, time, aiosqlite
+import os
+import time
+import aiosqlite
+
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,12 +11,12 @@ from telegram.ext import (
 
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")  # @public або -100... для приватного
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@zp_bez_pdr")      # @public або -100... для приватного
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zapbezpdr2025")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")           # -100... або id групи з модераторами
-TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))     # скільки перших постів модеруємо
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")               # -100... або id групи з модераторами
+TRUST_QUOTA = int(os.environ.get("TRUST_QUOTA", "0"))         # скільки перших постів модеруємо (0 = без модерації)
 
-# ========= КАТЕГОРІЇ (короткий код -> довга назва) =========
+# ========= КАТЕГОРІЇ =========
 CATEGORY_MAP = {
     "c1": "🚗 Перестроювання без покажчика повороту",
     "c2": "↔️ Перестроювання без надання переваги",
@@ -31,6 +34,16 @@ PDR_MAP = {
     "❗ Інше": "ПДР: (уточнити)",
 }
 
+# ========= ПРАВИЛА =========
+RULES_TEXT = (
+    "📜 Правила публікацій:\n"
+    "1) Публікуємо факти: фото/відео + короткий опис. Без образ та оцінок.\n"
+    "2) Не публікуємо зайві персональні дані, що не потрібні для фіксації порушення.\n"
+    "3) Якщо в кадрі чітко видно обличчя сторонніх людей/дітей — по можливості не знімайте крупним планом.\n"
+    "4) Пости — це повідомлення про можливе порушення. Остаточне рішення — за поліцією.\n\n"
+    "Звʼязок із адміністратором — через кнопку «Звернутись до адміністратора» в боті."
+)
+
 # ========= FASTAPI + PTB =========
 app = FastAPI()
 tg_app: Application = Application.builder().token(BOT_TOKEN).build()
@@ -38,7 +51,6 @@ tg_app: Application = Application.builder().token(BOT_TOKEN).build()
 # ========= DB =========
 async def init_db():
     async with aiosqlite.connect("bot.db") as db:
-        # користувачі
         await db.execute("""CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             trust INT DEFAULT 0,
@@ -46,7 +58,6 @@ async def init_db():
             hourly_count INT DEFAULT 0,
             seen_menu INT DEFAULT 0
         )""")
-        # вхідні репорти
         await db.execute("""CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -60,16 +71,11 @@ async def init_db():
             location_text TEXT,
             user_note TEXT
         )""")
-        # міграції на випадок старих таблиць
+        # idempotent-міграції
         try: await db.execute("ALTER TABLE users ADD COLUMN seen_menu INT DEFAULT 0")
         except: pass
-        for col, sqltype in [
-            ("location_lat", "REAL"),
-            ("location_lon", "REAL"),
-            ("location_text", "TEXT"),
-            ("user_note", "TEXT"),
-        ]:
-            try: await db.execute(f"ALTER TABLE inbox ADD COLUMN {col} {sqltype}")
+        for col in ("location_lat REAL", "location_lon REAL", "location_text TEXT", "user_note TEXT"):
+            try: await db.execute(f"ALTER TABLE inbox ADD COLUMN {col}")
             except: pass
         await db.commit()
 
@@ -102,8 +108,10 @@ async def ensure_user(uid: int):
 def resolve_chat_id(val: str):
     v = (val or "").strip()
     if v.startswith("-100"):
-        try: return int(v)
-        except: pass
+        try:
+            return int(v)
+        except:
+            pass
     return v  # @username
 
 async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, file_id: str, text: str):
@@ -115,7 +123,7 @@ async def publish_to_channel(context: ContextTypes.DEFAULT_TYPE, mtype: str, fil
 
 async def edit_q_message(q: "telegram.CallbackQuery", text: str, kb=None):
     try:
-        if q.message and (q.message.photo or q.message.video):
+        if q.message.photo or q.message.video:
             await q.edit_message_caption(caption=text, reply_markup=kb)
         else:
             await q.edit_message_text(text=text, reply_markup=kb)
@@ -134,27 +142,41 @@ async def get_inbox_rec(rec_id: int):
 async def send_main_menu(chat_id, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Новий репорт", callback_data="newreport")],
-        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")]
+        [InlineKeyboardButton("📨 Звернутись до адміністратора", callback_data="adminmsg")],
+        [InlineKeyboardButton("📜 Правила / Дисклеймер", callback_data="showrules")]
     ])
     try:
         await context.bot.send_message(
             chat_id=chat_id,
             text=("👋 Привіт! Оберіть дію нижче.\n"
                   "— «📤 Новий репорт» → надішліть фото/відео порушення.\n"
-                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал)."),
+                  "— «📨 Звернутись до адміністратора» → текстове звернення (не публікується в канал).\n"
+                  "— «📜 Правила / Дисклеймер» — ознайомитись з правилами публікацій."),
             reply_markup=kb
         )
     except Exception:
         pass
 
 # ========= HANDLERS =========
-# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args and len(context.args) > 0 and context.args[0].lower() == "report":
+        if update.message:
+            await update.message.reply_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
+        else:
+            await send_main_menu(update.effective_chat.id, context)
+        return
     await send_main_menu(update.effective_chat.id, context)
 
-# /report — швидкий старт репорту (опціонально)
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Надішліть фото або відео порушення. Потім оберіть категорію.")
+
+async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(RULES_TEXT, disable_web_page_preview=True)
+
+async def show_rules_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await edit_q_message(q, RULES_TEXT)
 
 async def start_new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -174,6 +196,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("📎 Надішліть фото або відео, не документ.")
             return
+
         await db.execute(
             "INSERT INTO inbox(user_id,caption,media_file_id,media_type,category,ts) VALUES(?,?,?,?,?,?)",
             (user.id, caption, file_id, mtype, "", int(time.time()))
@@ -215,7 +238,6 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb=detail_menu_kb(has_loc, has_note, rec_id)
     )
 
-# ===== Деталі репорту (локація/нотатка/фініш) =====
 async def det_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -280,14 +302,10 @@ async def det_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ Відхилити",   callback_data=f"mod|no|{rec_id}")
             ]])
             adm_caption = "📝 На модерацію\n" + base_text
-            try:
-                await tg_app.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id,
-                                            caption=adm_caption, reply_markup=kb) if mtype == "photo" \
-                else await tg_app.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id,
-                                                 caption=adm_caption, reply_markup=kb)
-            except Exception as e:
-                await edit_q_message(q, f"❗ Не вдалося надіслати на модерацію: {e}")
-                return
+            if mtype == "photo":
+                await tg_app.bot.send_photo(chat_id=int(ADMIN_CHAT_ID), photo=file_id, caption=adm_caption, reply_markup=kb)
+            else:
+                await tg_app.bot.send_video(chat_id=int(ADMIN_CHAT_ID), video=file_id, caption=adm_caption, reply_markup=kb)
             await edit_q_message(q, "🔎 Репорт надіслано на модерацію. Дякуємо!")
             return
 
@@ -405,7 +423,7 @@ async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TY
     text = (update.message.text or "").strip()
     if ADMIN_CHAT_ID:
         try:
-            uname = update.effective_user.username or 'без_ніка'
+            uname = update.effective_user.username or "без_ніка"
             msg = (
                 "📨 Нове звернення до адміністратора\n"
                 f"Від: @{uname} (id {update.effective_user.id})\n\n"
@@ -414,7 +432,6 @@ async def handle_admin_msg_text(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=msg)
         except Exception as e:
             print("ADMIN DM ERROR:", e)
-
     await update.message.reply_text("✅ Повідомлення надіслано адміністратору. Дякуємо!")
     return ConversationHandler.END
 
@@ -425,12 +442,14 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= ROUTING =========
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CommandHandler("report", report_cmd))
+tg_app.add_handler(CommandHandler("rules", rules_cmd))
 tg_app.add_handler(CommandHandler("chatid", chatid))
 
 tg_app.add_handler(CallbackQueryHandler(start_new_report, pattern=r"^newreport$"))
 tg_app.add_handler(CallbackQueryHandler(handle_category,   pattern=r"^cat\|"))
 tg_app.add_handler(CallbackQueryHandler(det_action,        pattern=r"^det\|"))
 tg_app.add_handler(CallbackQueryHandler(mod_action,        pattern=r"^mod\|"))
+tg_app.add_handler(CallbackQueryHandler(show_rules_btn,    pattern=r"^showrules$"))
 
 tg_app.add_handler(ConversationHandler(
     entry_points=[CallbackQueryHandler(ask_admin_msg, pattern=r"^adminmsg$")],
@@ -462,6 +481,7 @@ async def on_shutdown():
 async def root():
     return {"ok": True}
 
+# ========= WEBHOOK =========
 @app.post("/webhook/{secret}")
 async def telegram_webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
